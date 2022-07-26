@@ -1,3 +1,5 @@
 User_Emulation/
 test.py
 API/__pycache__/
+data/
+/*.txt
