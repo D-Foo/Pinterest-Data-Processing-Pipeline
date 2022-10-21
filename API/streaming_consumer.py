@@ -10,6 +10,9 @@ from pyspark.sql.functions import col
 from pyspark.sql.functions import from_json
 from pyspark.sql.functions import schema_of_json, regexp_replace
 from pyspark.sql.types import StructType,StructField, StringType, IntegerType
+from pyspark.sql import DataFrame
+
+from sqlalchemy import create_engine
 
 import findspark
 findspark.init()
@@ -17,6 +20,8 @@ findspark.init()
 import pyspark
 from collections import deque
 import json
+from dotenv import load_dotenv
+import psycopg2
 
 # create our consumer to retrieve the message from the topics
 #data_stream_consumer = KafkaConsumer(
@@ -39,6 +44,19 @@ image_video_dict = {
         "video" : 0,
         "multi-video(story page format)" : 0        
 }
+table_name = 'stream_data'
+db_name = 'pinterest_streaming'
+load_dotenv()
+HOST = 'localhost'
+USER = os.getenv('PGUSERNAME')
+PASSWORD = os.getenv('PASSWORD')
+DATABASE = db_name
+PORT = 5432
+
+conn =  psycopg2.connect(host=HOST, user=USER, password=PASSWORD, dbname=DATABASE, port=PORT)
+cur = conn.cursor()
+            
+
 
 def proccess(dataframe, epoch_id):
 
@@ -68,6 +86,11 @@ def proccess(dataframe, epoch_id):
         dataframe = dataframe.withColumn('follower_count', regexp_replace('follower_count', 'null', '0'))
         dataframe = dataframe.withColumn('follower_count', dataframe.follower_count.cast(IntegerType()))
 
+        #Format quotes for insertion into postgresql db
+        dataframe = dataframe.withColumn('title', regexp_replace('title', '\'', '\'\''))
+        dataframe = dataframe.withColumn('description', regexp_replace('description', '\'', '\'\''))
+        dataframe = dataframe.withColumn('tag_list', regexp_replace('description', '\'', '\'\''))
+
         # Get substring for topic type
 
         # Retain last 100 in queue and sum most popular unique categories
@@ -91,6 +114,21 @@ def proccess(dataframe, epoch_id):
                 sum += i
         print( f'Image/Video Percentages: Image {(image_video_dict["image"]/sum) * 100:.2f}%, Video {(image_video_dict["video"]/sum) * 100:.2f}%, Multi-video {(image_video_dict["multi-video(story page format)"]/sum) * 100:.2f}%' )
 
+        #Insert into local postgres DB
+        #table_name = 'stream_data'
+        #db_name = 'pinterest_streaming'
+        #dataframe.write.format('jdbc')\
+        #        .option('url', f'jdbc:postgresql://localhost:5432/{db_name}')\
+        #        .option('driver', 'org.postgresql.Driver').option('dbtable', table_name)\
+        #        .option('user', os.getenv('PGUSERNAME')).option('password', os.getenv('PASSWORD')).save()
+        for row in rows:
+                cur.execute(f"""
+            INSERT INTO {table_name} (index, unique_id, title, description, poster_name, follower_count, tag_list, is_image_or_video, image_src, downloaded, save_location, category)
+            VALUES({row.asDict()['index']}, \'{row.asDict()['unique_id']}\', \'{row.asDict()['title']}\', \'{row.asDict()['description']}\', \'{row.asDict()['poster_name']}\', \'{row.asDict()['follower_count']}\',
+                 \'{row.asDict()['tag_list']}\', \'{row.asDict()['is_image_or_video']}\', \'{row.asDict()['image_src']}\', {row.asDict()['downloaded']}, \'{row.asDict()['save_location']}\', \'{row.asDict()['category']}\') 
+            ON CONFLICT (unique_id) DO NOTHING;""")
+                conn.commit()
+        
 # Download spark sql kakfa package from Maven repository and submit to PySpark at runtime. 
 os.environ['PYSPARK_SUBMIT_ARGS'] = '--packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.2.1 pyspark-shell'
 # specify the topic we want to stream data from.
@@ -123,3 +161,5 @@ stream_df = spark \
 
 # outputting the messages to the console 
 stream_df.writeStream.foreachBatch(proccess).start().awaitTermination()
+cur.close()
+conn.close()
